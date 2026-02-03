@@ -1,4 +1,140 @@
-# =========================================================
+import numpy as np
+import pandas as pd
+# ===== 前提：先排序（rolling / diff / ewm 都依赖顺序）=====
+def prepare_sort(df: pd.DataFrame) -> pd.DataFrame:
+    sort_cols = [c for c in ['SecuCode','TradingDay','TimeEnd','TimeStart'] if c in df.columns]
+    return df.sort_values(sort_cols).reset_index(drop=True)
+
+# ===== 把任意 Series 变成 MultiIndex： (SecuCode, TradingDay, row_id) =====
+def _mi_series(df: pd.DataFrame, s: pd.Series) -> pd.Series:
+    return pd.Series(
+        s.to_numpy(),
+        index=pd.MultiIndex.from_arrays([df['SecuCode'].to_numpy(),
+                                         df['TradingDay'].to_numpy(),
+                                         df.index.to_numpy()],
+                                        names=['SecuCode','TradingDay','row'])
+    )
+
+def _mi_to_flat(mi_s: pd.Series, df: pd.DataFrame) -> pd.Series:
+    # mi_s index: (SecuCode, TradingDay, row) -> 按 row 还原到 df.index
+    return mi_s.droplevel([0,1]).reindex(df.index)
+
+def roll_mean_by_st(df: pd.DataFrame, s: pd.Series, w: int) -> pd.Series:
+    mi = _mi_series(df, s)
+    out = mi.groupby(level=[0,1], sort=False).rolling(w, min_periods=max(2, w//2)).mean()
+    out = out.reset_index(level=[0,1], drop=True)  # 保留 row
+    return _mi_to_flat(out, df)
+
+def roll_std_by_st(df: pd.DataFrame, s: pd.Series, w: int) -> pd.Series:
+    mi = _mi_series(df, s)
+    out = mi.groupby(level=[0,1], sort=False).rolling(w, min_periods=max(2, w//2)).std()
+    out = out.reset_index(level=[0,1], drop=True)
+    return _mi_to_flat(out, df)
+
+def ewm_mean_by_st(df: pd.DataFrame, s: pd.Series, span: int) -> pd.Series:
+    mi = _mi_series(df, s)
+    out = mi.groupby(level=[0,1], sort=False).ewm(span=span, adjust=False).mean()
+    out = out.reset_index(level=[0,1], drop=True)
+    return _mi_to_flat(out, df)
+
+def diff_by_st(df: pd.DataFrame, s: pd.Series) -> pd.Series:
+    mi = _mi_series(df, s)
+    out = mi.groupby(level=[0,1], sort=False).diff()
+    return _mi_to_flat(out, df)
+
+def pct_change_by_st(df: pd.DataFrame, s: pd.Series) -> pd.Series:
+    mi = _mi_series(df, s)
+    out = mi.groupby(level=[0,1], sort=False).pct_change()
+    return _mi_to_flat(out, df)
+
+# ========= basics =========
+def _has(df, cols): return all(c in df.columns for c in cols)
+def _get(df, c): return df[c].astype(float) if c in df.columns else pd.Series(np.nan, index=df.index, dtype="float64")
+
+def _keys(df):
+    if not _has(df, ["SecuCode", "TradingDay"]):
+        raise ValueError("Need SecuCode & TradingDay in df.")
+    return ["SecuCode", "TradingDay"]
+
+def _g(df, s):
+    k = _keys(df)
+    return s.groupby([df[k[0]], df[k[1]]], sort=False)
+
+def _roll(df, s, i, minp=5, func="mean"):
+    r = getattr(_g(df, s).rolling(i, min_periods=minp), func)()
+    return r.reset_index(level=[0,1], drop=True)
+
+def _z(df, s, i, minp=5):
+    m = _roll(df, s, i, minp, "mean")
+    sd = _roll(df, s, i, minp, "std").replace(0, np.nan)
+    return (s - m) / sd
+
+def _clip_inf(s):
+    return s.replace([np.inf, -np.inf], np.nan)
+
+# ========= microstructure primitives =========
+def _mid(df):
+    if "mid" in df.columns:
+        return _get(df, "mid")
+    bid1, ask1 = _get(df,"BidPrice1_last"), _get(df,"AskPrice1_last")
+    m = np.where((bid1>0) & (ask1>0), 0.5*(bid1+ask1),
+                 np.where(bid1>0, bid1, np.where(ask1>0, ask1, np.nan)))
+    return pd.Series(m, index=df.index, dtype="float64")
+
+def _spread(df):
+    if "spread" in df.columns:
+        return _get(df, "spread")
+    bid1, ask1 = _get(df,"BidPrice1_last"), _get(df,"AskPrice1_last")
+    s = (ask1 - bid1).where((bid1>0) & (ask1>0))
+    return s
+
+def _microprice(df):
+    bid1, ask1 = _get(df,"BidPrice1_last"), _get(df,"AskPrice1_last")
+    bv1,  av1  = _get(df,"BidVolume1_last"), _get(df,"AskVolume1_last")
+    denom = (bv1 + av1).replace(0, np.nan)
+    mp = (ask1*bv1 + bid1*av1)/denom
+    mp = mp.where((bid1>0) & (ask1>0))
+    return mp
+
+def _depth(df, side="bid", L=4):
+    vols = []
+    for lv in range(1, L+1):
+        c = f"{'Bid' if side=='bid' else 'Ask'}Volume{lv}_last"
+        vols.append(_get(df, c))
+    d = sum(vols)
+    return d
+
+def _wprice(df, side="bid"):
+    # WeightBidPrice_last / WeightAskPrice_last fallback to VWAP-ish if missing
+    c = "WeightBidPrice_last" if side=="bid" else "WeightAskPrice_last"
+    return _get(df, c)
+
+def _ofi1_proxy(df):
+    # simplified OFI proxy using best level volume changes (within day)
+    bv1 = _get(df,"BidVolume1_last")
+    av1 = _get(df,"AskVolume1_last")
+    gbv = _g(df, bv1)
+    gav = _g(df, av1)
+    dbv = gbv.diff()
+    dav = gav.diff()
+    return (dbv - dav).astype(float)
+
+def _logret_mid(df):
+    m = _mid(df)
+    gm = _g(df, m)
+    r = np.log(m) - np.log(gm.shift(1))
+    return r
+
+def _amihud(df):
+    # |ret| / turnover (or volume) — intraday illiquidity proxy
+    r = _logret_mid(df).abs()
+    to = _get(df, "Turnover_sum")
+    v  = _get(df, "Volume_sum")
+    denom = to.where(to>0, v).replace(0, np.nan)
+    return r / denom
+
+def _safe_div(a, b):
+    return _clip_inf(a / b.replace(0, np.nan))
 # 001 价格动量（EMA 差）【技术】
 # param: i=short, j=long
 # =========================================================
