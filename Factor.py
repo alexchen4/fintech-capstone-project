@@ -1,3 +1,10 @@
+"""
+This module defines intraday price/volume factor construction utilities.
+It sits in the factor-generation stage before signal aggregation.
+Functions are used for feature engineering on the 15-minute panel.
+Status: active research code for capstone experiments, not production-hardened.
+"""
+
 import numpy as np
 import pandas as pd
 

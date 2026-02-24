@@ -1,0 +1,8 @@
+pandas
+numpy
+pyarrow
+tqdm
+requests
+pymupdf
+pdfplumber
+rapidfuzz
