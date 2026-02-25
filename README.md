@@ -18,6 +18,7 @@ Within this framework, sentiment analysis is not treated as a standalone trading
 - **`src/`**: reusable pipeline modules (`src/cninfo`) for I/O, metadata loading/scraping stubs, PDF processing, sentiment scoring, and event-bar alignment.
 - **`data/`**: staged local artifacts (`raw/`, `interim/`, `processed/`), intentionally gitignored to prevent accidental data commits.
 - **`Factor.py`**: existing factor-generation script retained as-is.
+Place `announcements_meta_*.csv` under `data/raw/meta/` (ignored by git), or pass an absolute path via `--meta_csv`.
 
 Completed currently: repository hygiene, modular sentiment MVP skeleton, and notebook wiring for reproducible local runs.  
 In progress: broader data coverage, production-grade CNINFO ingestion, and full CAM/RL integration/testing.
@@ -40,3 +41,40 @@ This MVP is scoped to staged, leakage-aware data engineering and preliminary val
 - Integrate sentiment-derived regime features into CAM state representations.
 - Evaluate whether factor weights shift systematically across sentiment/market regimes.
 - Run robustness checks across subperiods, sectors, and alternative sentiment specifications.
+
+## Sentiment MVP (Dec-2025 Meta Only)
+- Required inputs:
+  - Meta CSV: `data/raw/meta/announcements_meta_2025-12.csv`
+  - Fixture PDFs in one folder, named exactly `<ann_id>.pdf` (for example `1224882117.pdf`)
+- Run command:
+  - `.venv/bin/python scripts/sentiment_mvp.py --meta_csv data/raw/meta/announcements_meta_2025-12.csv --fixtures_dir data/raw/fixtures/pdfs --subset_mode existing_pdfs`
+  - `.venv/bin/python scripts/sentiment_mvp.py --meta_csv data/raw/meta/announcements_meta_2025-12.csv --fixtures_dir data/raw/fixtures/pdfs --subset_mode first_n --secu_code 000001 --n 20`
+- `--subset_mode`:
+  - `first_n` (default): filter by `--secu_code`, take first `--n`, fail-fast if PDFs are missing.
+  - `existing_pdfs`: build subset directly from `fixtures_dir/*.pdf` ann_ids for deterministic end-to-end fixture runs.
+- Optional alignment preview:
+  - Add `--align_15m` and (optionally) `--bars_calendar_file <path>`
+  - If bars/calendar file is missing, script prints: `alignment skipped: missing bars calendar file <path>`
+- Artifacts written:
+  - `data/interim/meta_mvp.csv`
+  - `data/interim/texts_mvp.parquet`
+  - `data/interim/texts_mvp.csv`
+  - `data/processed/sentiment_mvp.parquet`
+  - `data/processed/sentiment_mvp.csv`
+- Quick manual verification:
+  - `.venv/bin/python -c "import pandas as pd; print(pd.read_csv('data/interim/meta_mvp.csv').head(3))"`
+  - `.venv/bin/python -c "import pandas as pd; print(pd.read_csv('data/interim/texts_mvp.csv')[['ann_id','text_len','extraction_ok']].head(3))"`
+  - `.venv/bin/python -c "import pandas as pd; print(pd.read_csv('data/processed/sentiment_mvp.csv')[['ann_id','sentiment_score','sentiment_label','model_backend']].head(3))"`
+- Troubleshooting:
+  - Missing PDFs: rename/copy fixture files into the fixtures directory as `<ann_id>.pdf`.
+  - Short extracted text: inspect source PDF quality/content; extraction still keeps row with `extraction_ok=False` if needed.
+  - `image_only_pdf`: PDF opens but has no selectable text (scanned/image-based); excluded from sentiment by default unless `--include_failed_in_sentiment` is set.
+  - `transformers` missing or unavailable: script auto-falls back to built-in lexicon baseline.
+
+## Handling Extraction Failures
+- Triage only (writes `data/interim/extraction_failures_report.csv`, no scoring):
+  - `.venv/bin/python scripts/sentiment_mvp.py --meta_csv data/raw/meta/announcements_meta_2025-12.csv --fixtures_dir data/raw/fixtures/pdfs --subset_mode existing_pdfs --triage_only`
+- Re-extract only failed announcement IDs from existing `data/interim/texts_mvp.csv`:
+  - `.venv/bin/python scripts/sentiment_mvp.py --fixtures_dir data/raw/fixtures/pdfs --reextract_failed`
+- OCR is intentionally not included in MVP; unresolved failures remain flagged via `extraction_ok` and `extraction_error`.
+- Sentiment excludes extraction failures by default; use `--include_failed_in_sentiment` to include them.

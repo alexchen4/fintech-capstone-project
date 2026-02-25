@@ -1,14 +1,12 @@
-# Data artifacts
-data/**
-!data/.gitkeep
-
-# Data file types under data only
-data/**/*.pdf
-data/**/*.parquet
-data/**/*.csv
+# Data artifacts (generated/large)
+data/raw/fixtures/pdfs/
+data/interim/
+data/processed/
+*.parquet
 
 # Python/Jupyter artifacts
 .ipynb_checkpoints/
 __pycache__/
+*.pyc
 venv/
 .venv/
