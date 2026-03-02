@@ -1,12 +1,32 @@
-# Data artifacts (generated/large)
-data/raw/fixtures/pdfs/
-data/interim/
-data/processed/
-*.parquet
+# OS artifacts
+.DS_Store
 
 # Python/Jupyter artifacts
 .ipynb_checkpoints/
 __pycache__/
 *.pyc
+*.pyo
 venv/
 .venv/
+
+# Data artifacts (never commit)
+data/raw/
+data/processed/
+data/interim/
+data/universe/universe_price.csv
+data/universe/universe.csv
+*.parquet
+*.pdf
+*.csv
+!data/universe/universe_target.csv
+
+# Runtime junk
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.venv/
+
+# Model binaries (teammates commit these separately)
+*.pt
+*.pyd
