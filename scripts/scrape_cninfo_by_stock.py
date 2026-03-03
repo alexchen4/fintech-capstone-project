@@ -225,6 +225,16 @@ def main() -> int:
 
     codes = load_universe_codes(args.universe_csv)
     session = requests.Session()
+    # Warm up session with a page visit before scraping
+    try:
+        session.get(
+            "https://www.cninfo.com.cn/new/index",
+            headers=API_HEADERS,
+            timeout=15
+        )
+        time.sleep(1.0)
+    except Exception:
+        pass  # proceed anyway
 
     completed = 0
     skipped = 0
@@ -232,7 +242,19 @@ def main() -> int:
     total_announcements = 0
     failures: list[dict[str, str]] = []
 
-    for code in codes:
+    for i, code in enumerate(codes):
+        if i > 0 and i % 10 == 0:
+            session = requests.Session()
+            try:
+                session.get(
+                    "https://www.cninfo.com.cn/new/index",
+                    headers=API_HEADERS,
+                    timeout=15
+                )
+                time.sleep(2.0)
+                print(f"[scrape] session refreshed at stock {i}")
+            except Exception:
+                pass
         out_file = args.out_dir / f"announcements_{code}.csv"
         if out_file.exists() and not args.overwrite:
             print(f"[scrape] code={code} SKIP existing file={out_file}")
