@@ -12,6 +12,21 @@ from common.universe import validate_universe
 
 REQUIRED_OUTPUT_COLUMNS = ["ann_id", "SecuCode", "publish_dt_utc", "title", "detail_url"]
 
+# Documents that are structurally uninformative for sentiment:
+# typically scanned PDFs with no extractable text, or pure
+# administrative/boilerplate filings with zero news signal.
+TITLE_BLOCKLIST: list[str] = [
+    "法律意见书",        # Legal opinions - almost always scanned
+    "受托管理事务报告",  # Bond trustee periodic reports - boilerplate
+    "临时受托管理",      # Bond trustee interim reports - boilerplate
+    "债券受托",          # Bond trustee misc
+    "证券变动月报表",    # H-share monthly securities change forms
+    "验资报告",          # Capital verification reports - scanned
+    "审计报告",          # Audit reports - scanned
+    "司法",              # Court/judicial notices - scanned
+    "仲裁",              # Arbitration notices - scanned
+]
+
 
 def _pick_first_existing(cols: list[str], candidates: list[str], label: str) -> str:
     lower_map = {c.lower(): c for c in cols}
@@ -85,6 +100,16 @@ def filter_meta_to_universe(meta_path: Path, universe_csv: Path) -> pd.DataFrame
 
     universe_codes = set(_load_universe(universe_csv))
     df = df[df["SecuCode"].isin(universe_codes)].copy()
+
+    # Drop structurally uninformative document types
+    blocklist_pattern = "|".join(re.escape(kw) for kw in TITLE_BLOCKLIST)
+    before_block = len(df)
+    df = df[~df["title"].str.contains(blocklist_pattern, na=False)].copy()
+    after_block = len(df)
+    if before_block != after_block:
+        import sys
+        print(f"[filter_meta] blocklist dropped {before_block - after_block} rows "
+              f"({before_block} -> {after_block})", file=sys.stderr)
 
     validate_universe(df, universe_codes, col="SecuCode")
 
