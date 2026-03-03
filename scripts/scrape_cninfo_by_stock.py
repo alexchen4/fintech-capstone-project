@@ -15,8 +15,10 @@ import requests
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_UNIVERSE = ROOT / "data" / "universe" / "universe.csv"
 DEFAULT_OUT_DIR = ROOT / "data" / "raw" / "meta" / "by_stock"
+ORGID_CACHE_PATH = DEFAULT_OUT_DIR / "orgid_cache.json"
 
-API_URL = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
+TOPSEARCH_URL = "https://www.cninfo.com.cn/new/information/topSearch/query"
+HIS_URL = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
 API_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -42,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sleep_sec", type=float, default=1.0)
     p.add_argument("--jitter_sec", type=float, default=0.3)
     p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--test_resolve", action="store_true")
     return p.parse_args()
 
 
@@ -55,12 +58,199 @@ def normalize_code(x: object) -> str:
     return digits[-6:].zfill(6)
 
 
-def derive_exchange_plate_orgid(code: str) -> tuple[str, str, str]:
-    if code.startswith(("000", "001", "002", "003", "300")):
-        return "szse", "sz", f"gssz0{code}"
-    if code.startswith(("600", "601", "603", "605")):
-        return "sse", "sh", f"gssh0{code}"
-    return "sse", "sh", f"gssh0{code}"
+def warmup_session(session: requests.Session, sleep_sec: float) -> None:
+    try:
+        session.get(
+            "https://www.cninfo.com.cn/new/index",
+            headers=API_HEADERS,
+            timeout=15
+        )
+        time.sleep(max(0.0, sleep_sec))
+    except Exception:
+        pass
+
+
+def load_orgid_cache(path: Path) -> dict[str, dict[str, str]]:
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for k, v in raw.items():
+        code = normalize_code(k)
+        if not code or not isinstance(v, dict):
+            continue
+        column = str(v.get("column") or "").strip()
+        plate = str(v.get("plate") or "").strip()
+        orgid = str(v.get("orgid") or "").strip()
+        if column and plate and orgid:
+            out[code] = {"column": column, "plate": plate, "orgid": orgid}
+    return out
+
+
+def save_orgid_cache_atomic(path: Path, cache: dict[str, dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2, sort_keys=True)
+    tmp_path.replace(path)
+
+
+def _extract_topsearch_items(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if isinstance(data, dict):
+        for key in ("announcements", "classification", "stockList", "records", "result", "data"):
+            v = data.get(key)
+            if isinstance(v, list):
+                return [x for x in v if isinstance(x, dict)]
+    return []
+
+
+def _build_his_payload(
+    code: str,
+    orgid: str,
+    column: str,
+    plate: str,
+    page_num: int,
+    page_size: int,
+    start_date: str,
+    end_date: str,
+) -> dict[str, Any]:
+    return {
+        "stock": f"{code},{orgid}",
+        "tabName": "fulltext",
+        "pageSize": page_size,
+        "pageNum": page_num,
+        "column": column,
+        "category": "",
+        "plate": plate,
+        "seDate": f"{start_date}~{end_date}",
+        "searchkey": "",
+        "secid": "",
+        "sortName": "",
+        "sortType": "",
+        "isHLtitle": "true",
+    }
+
+
+def _probe_total_record_num(
+    session: requests.Session,
+    code: str,
+    orgid: str,
+    column: str,
+    plate: str,
+    headers: dict,
+) -> int:
+    payload = _build_his_payload(
+        code=code,
+        orgid=orgid,
+        column=column,
+        plate=plate,
+        page_num=1,
+        page_size=1,
+        start_date="1990-01-01",
+        end_date="2099-12-31",
+    )
+    try:
+        resp = session.post(HIS_URL, data=payload, headers=headers, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            return 0
+        return int(data.get("totalRecordNum", 0))
+    except Exception:
+        return 0
+
+
+def resolve_org(session: requests.Session, code: str, headers: dict) -> tuple[str, str, str]:
+    """
+    Return (column, plate, orgid) for a 6-digit code by calling TOPSEARCH_URL.
+    """
+    data: Any = None
+    post_err = ""
+    try:
+        resp = session.post(
+            TOPSEARCH_URL,
+            data={"keyWord": code, "maxNum": 10},
+            headers=headers,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        post_err = f"{type(e).__name__}: {e}"
+
+    if data is None:
+        try:
+            resp = session.get(
+                TOPSEARCH_URL,
+                params={"keyWord": code, "maxNum": 10},
+                headers=headers,
+                timeout=20,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            raise RuntimeError(f"topSearch failed for code={code}; POST error={post_err}; GET error={type(e).__name__}: {e}")
+
+    items = _extract_topsearch_items(data)
+    match = None
+    for item in items:
+        if str(item.get("code") or "").strip() == code:
+            match = item
+            break
+
+    if match is None:
+        seen = sorted({str(item.get("code") or "").strip() for item in items if item.get("code") is not None})
+        keys_seen = sorted({k for item in items for k in item.keys()})
+        raise RuntimeError(f"topSearch returned no exact code match for code={code}; seen_codes={seen}; keys_seen={keys_seen}")
+
+    orgid = str(match.get("orgId") or match.get("orgid") or "").strip()
+    if not orgid:
+        raise RuntimeError(f"topSearch missing orgId for code={code}; keys={sorted(match.keys())}")
+
+    orgid_lower = orgid.lower()
+    if orgid_lower.startswith("gssz"):
+        return "szse", "sz", orgid
+    if orgid_lower.startswith("gssh"):
+        return "sse", "sh", orgid
+
+    fields = [
+        str(match.get("market") or "").lower(),
+        str(match.get("marketType") or "").lower(),
+        str(match.get("plate") or "").lower(),
+        str(match.get("exchange") or "").lower(),
+    ]
+    merged = " ".join(fields)
+    if ("sz" in merged) or ("深" in merged):
+        return "szse", "sz", orgid
+    if ("sh" in merged) or ("沪" in merged):
+        return "sse", "sh", orgid
+
+    type_hint = str(match.get("type") or "").strip().lower()
+    if type_hint in {"sz", "szse", "sza"}:
+        return "szse", "sz", orgid
+    if type_hint in {"sh", "sse", "sha"}:
+        return "sse", "sh", orgid
+
+    totals = {
+        "szse/sz": _probe_total_record_num(session, code, orgid, "szse", "sz", headers),
+        "sse/sh": _probe_total_record_num(session, code, orgid, "sse", "sh", headers),
+    }
+    if totals["szse/sz"] > 0 and totals["sse/sh"] <= 0:
+        return "szse", "sz", orgid
+    if totals["sse/sh"] > 0 and totals["szse/sz"] <= 0:
+        return "sse", "sh", orgid
+
+    raise RuntimeError(
+        f"topSearch orgId prefix unknown for code={code}; orgId={orgid}; "
+        f"keys={sorted(match.keys())}; probe_totals={totals}"
+    )
 
 
 def to_utc_str_from_ms(ms: Any) -> str:
@@ -92,14 +282,14 @@ def load_universe_codes(path: Path) -> list[str]:
 
 def post_with_retry(session: requests.Session, payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     try:
-        resp = session.post(API_URL, data=payload, headers=API_HEADERS, timeout=20)
+        resp = session.post(HIS_URL, data=payload, headers=API_HEADERS, timeout=20)
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
 
     if resp.status_code == 429:
         time.sleep(60.0)
         try:
-            resp = session.post(API_URL, data=payload, headers=API_HEADERS, timeout=20)
+            resp = session.post(HIS_URL, data=payload, headers=API_HEADERS, timeout=20)
         except Exception as e:
             return None, f"429_retry_{type(e).__name__}: {e}"
 
@@ -121,7 +311,7 @@ def scrape_one_stock(
     code: str,
     exchange: str,
     plate: str,
-    derived_orgid: str,
+    orgid: str,
     start_date: str,
     end_date: str,
     page_size: int,
@@ -133,21 +323,16 @@ def scrape_one_stock(
     page = 1
 
     while page <= page_cap:
-        payload = {
-            "stock": f"{code},{derived_orgid}",
-            "tabName": "fulltext",
-            "pageSize": page_size,
-            "pageNum": page,
-            "column": exchange,
-            "category": "",
-            "plate": plate,
-            "seDate": f"{start_date}~{end_date}",
-            "searchkey": "",
-            "secid": "",
-            "sortName": "",
-            "sortType": "",
-            "isHLtitle": "true",
-        }
+        payload = _build_his_payload(
+            code=code,
+            orgid=orgid,
+            column=exchange,
+            plate=plate,
+            page_num=page,
+            page_size=page_size,
+            start_date=start_date,
+            end_date=end_date,
+        )
 
         data, err = post_with_retry(session, payload)
         if err is not None:
@@ -222,19 +407,46 @@ def scrape_one_stock(
 def main() -> int:
     args = parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    orgid_cache_path = args.out_dir / ORGID_CACHE_PATH.name
+
+    if args.test_resolve:
+        session = requests.Session()
+        warmup_session(session, 1.0)
+        test_codes = ["000858", "001979"]
+        totals: dict[str, int] = {}
+        for code in test_codes:
+            column, plate, orgid = resolve_org(session=session, code=code, headers=API_HEADERS)
+            payload = _build_his_payload(
+                code=code,
+                orgid=orgid,
+                column=column,
+                plate=plate,
+                page_num=1,
+                page_size=5,
+                start_date=args.start_date,
+                end_date=args.end_date,
+            )
+            data, err = post_with_retry(session, payload)
+            if err is not None or data is None:
+                raise RuntimeError(f"test_resolve hisAnnouncement failed for code={code}: {err}")
+            try:
+                total = int(data.get("totalRecordNum", 0))
+            except Exception:
+                total = 0
+            totals[code] = total
+            print(
+                f"[test_resolve] code={code} orgid={orgid} "
+                f"column={column} plate={plate} totalRecordNum={total}"
+            )
+        bad = [code for code, total in totals.items() if total <= 0]
+        if bad:
+            raise RuntimeError(f"test_resolve expected totalRecordNum>0 for all codes; failed_codes={bad}; totals={totals}")
+        return 0
 
     codes = load_universe_codes(args.universe_csv)
+    orgid_cache = load_orgid_cache(orgid_cache_path)
     session = requests.Session()
-    # Warm up session with a page visit before scraping
-    try:
-        session.get(
-            "https://www.cninfo.com.cn/new/index",
-            headers=API_HEADERS,
-            timeout=15
-        )
-        time.sleep(1.0)
-    except Exception:
-        pass  # proceed anyway
+    warmup_session(session, 1.0)
 
     completed = 0
     skipped = 0
@@ -245,23 +457,25 @@ def main() -> int:
     for i, code in enumerate(codes):
         if i > 0 and i % 10 == 0:
             session = requests.Session()
-            try:
-                session.get(
-                    "https://www.cninfo.com.cn/new/index",
-                    headers=API_HEADERS,
-                    timeout=15
-                )
-                time.sleep(2.0)
-                print(f"[scrape] session refreshed at stock {i}")
-            except Exception:
-                pass
+            warmup_session(session, 2.0)
+            print(f"[scrape] session refreshed at stock {i}")
         out_file = args.out_dir / f"announcements_{code}.csv"
         if out_file.exists() and not args.overwrite:
             print(f"[scrape] code={code} SKIP existing file={out_file}")
             skipped += 1
             continue
 
-        exchange, plate, derived_orgid = derive_exchange_plate_orgid(code)
+        if code in orgid_cache:
+            cached = orgid_cache[code]
+            exchange = cached["column"]
+            plate = cached["plate"]
+            orgid = cached["orgid"]
+        else:
+            exchange, plate, orgid = resolve_org(session=session, code=code, headers=API_HEADERS)
+            orgid_cache[code] = {"column": exchange, "plate": plate, "orgid": orgid}
+            save_orgid_cache_atomic(orgid_cache_path, orgid_cache)
+
+        print(f"[scrape] code={code} orgid={orgid} column={exchange} plate={plate}")
 
         try:
             df, err = scrape_one_stock(
@@ -269,7 +483,7 @@ def main() -> int:
                 code=code,
                 exchange=exchange,
                 plate=plate,
-                derived_orgid=derived_orgid,
+                orgid=orgid,
                 start_date=args.start_date,
                 end_date=args.end_date,
                 page_size=args.page_size,
