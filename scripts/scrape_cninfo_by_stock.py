@@ -57,10 +57,10 @@ def normalize_code(x: object) -> str:
 
 def derive_exchange_plate_orgid(code: str) -> tuple[str, str, str]:
     if code.startswith(("000", "001", "002", "003", "300")):
-        return "szse", "sz", f"gssz{code}"
+        return "szse", "sz", f"gssz0{code}"
     if code.startswith(("600", "601", "603", "605")):
-        return "sse", "sh", f"gssh{code}"
-    return "sse", "sh", f"gssh{code}"
+        return "sse", "sh", f"gssh0{code}"
+    return "sse", "sh", f"gssh0{code}"
 
 
 def to_utc_str_from_ms(ms: Any) -> str:
