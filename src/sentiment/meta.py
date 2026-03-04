@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -11,6 +12,7 @@ from common.secu import normalize_secu_series
 from common.universe import validate_universe
 
 REQUIRED_OUTPUT_COLUMNS = ["ann_id", "SecuCode", "publish_dt_utc", "title", "detail_url"]
+_SCHEMA_DEBUG_PRINTED = False
 
 # Documents that are structurally uninformative for sentiment:
 # typically scanned PDFs with no extractable text, or pure
@@ -25,6 +27,18 @@ TITLE_BLOCKLIST: list[str] = [
     "审计报告",          # Audit reports - scanned
     "司法",              # Court/judicial notices - scanned
     "仲裁",              # Arbitration notices - scanned
+    "占用资金",
+    "资金占用",
+    "关联资金往来",
+    "专项审计",
+    "鉴证报告",
+    "核查报告",
+    "募集资金存放",
+    "会计政策变更",
+    "事前认可意见",
+    "独立意见",
+    "社会责任报告",
+    "已取消",
 ]
 
 
@@ -55,6 +69,48 @@ def _load_meta(meta_path: Path) -> pd.DataFrame:
     raise ValueError(f"Unsupported meta format: {meta_path}. Use .csv or .parquet")
 
 
+def _log_schema_once(message: str) -> None:
+    global _SCHEMA_DEBUG_PRINTED
+    if _SCHEMA_DEBUG_PRINTED:
+        return
+    print(message, file=sys.stderr)
+    _SCHEMA_DEBUG_PRINTED = True
+
+
+def _normalize_loaded_meta_schema(raw: pd.DataFrame) -> pd.DataFrame:
+    if "SecuCode" in raw.columns:
+        _log_schema_once("[meta] detected schema=canonical")
+        return raw
+
+    if "ticker" in raw.columns:
+        for required in ("publish_ts", "pdf_url", "title"):
+            if required not in raw.columns:
+                raise ValueError(
+                    f"Detected ticker schema but missing required column '{required}'. "
+                    "Expected ticker/publish_ts/pdf_url/title."
+                )
+
+        df = raw.copy()
+        ticker_raw = df["ticker"].fillna("").astype(str).str.strip()
+        df["SecuCode"] = ticker_raw.apply(
+            lambda x: str(int(x)).zfill(6) if str(x).strip().isdigit() else str(x).strip().zfill(6)
+        )
+        df["publish_dt_utc"] = df["publish_ts"]
+        df["detail_url"] = df["pdf_url"]
+        df["title"] = df["title"]
+        df["ann_id"] = (
+            df["pdf_url"]
+            .fillna("")
+            .astype(str)
+            .str.extract(r"/(\d+)\.PDF", flags=re.IGNORECASE, expand=False)
+            .fillna("")
+        )
+        _log_schema_once("[meta] detected schema=ticker/publish_ts/pdf_url; normalized to canonical")
+        return df[REQUIRED_OUTPUT_COLUMNS].copy()
+
+    return raw
+
+
 def _load_universe(universe_csv: Path) -> list[str]:
     uni = pd.read_csv(universe_csv)
     code_col = _pick_first_existing(list(uni.columns), ["SecuCode", "ticker", "secu_code"], "universe code")
@@ -66,11 +122,15 @@ def _load_universe(universe_csv: Path) -> list[str]:
 
 
 def filter_meta_to_universe(meta_path: Path, universe_csv: Path) -> pd.DataFrame:
-    raw = _load_meta(meta_path)
+    raw = _normalize_loaded_meta_schema(_load_meta(meta_path))
     cols = list(raw.columns)
 
     code_col = _pick_first_existing(cols, ["SecuCode", "ticker", "secu_code", "symbol"], "SecuCode")
-    publish_col = _pick_first_existing(cols, ["publish_dt", "publish_ts", "publish_time", "publish_datetime"], "publish datetime")
+    publish_col = _pick_first_existing(
+        cols,
+        ["publish_dt_utc", "publish_dt", "publish_ts", "publish_time", "publish_datetime"],
+        "publish datetime",
+    )
     title_col = _pick_first_existing(cols, ["title", "announcement_title"], "title")
     detail_col = _pick_first_existing(cols, ["detail_url", "pdf_url", "url"], "detail URL")
 
