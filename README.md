@@ -1,42 +1,119 @@
-# Adaptive Multi-Factor Aggregation with CNINFO Sentiment Context on CSI 300 (15-Minute Horizon)
+# Adaptive Multi-Factor Aggregation with Sentiment Context on CSI 300 (15-Minute Horizon)
 
 ## Executive Summary
-This capstone project studies how to improve short-horizon equity signal aggregation in the CSI 300 universe by combining price-derived factors with disclosure-based sentiment context. The core problem is not only factor construction, but dynamic weighting: in real markets, the usefulness of a factor can vary across volatility regimes, liquidity conditions, and information cycles. Static averaging of signals can therefore underperform when market structure changes intraday.
+This capstone project improves short-horizon equity signal aggregation in the CSI 300 universe by combining 70 price-derived microstructure factors with disclosure-based sentiment context. The core contribution is dynamic factor weighting: an RL aggregation layer learns when each factor should receive more or less weight, conditioned on current market state and sentiment regime.
 
-Adaptive signal weighting is central because it frames portfolio decision-making as a state-dependent allocation problem: given a set of candidate factors, the system should learn when each factor should receive more or less weight. Reinforcement learning is relevant at this stage because it can model sequential decisions under uncertainty, using realized outcomes to update a policy that maps market state features to aggregation weights.
+---
 
-Within this framework, sentiment analysis is not treated as a standalone trading model. Instead, it is developed as contextual regime information derived from CNINFO public announcements. The sentiment pipeline extracts and scores announcement text, then aligns events to leakage-safe 15-minute bar timestamps so that the aggregation layer can consume sentiment features without look-ahead bias. This repository currently focuses on building that reproducible sentiment data pipeline and integration scaffolding; policy learning and full CAM/RL evaluation are active development components rather than completed deliverables.
+## Progress Update (2026-03-11)
 
-## System Architecture Overview
-- **15-minute price panel**: intraday bar data for CSI 300 constituents serves as the common temporal backbone.
-- **Factor generation (`Factor.py`)**: existing factor logic produces candidate market signals from price/volume data.
-- **Sentiment pipeline**: CNINFO metadata collection (placeholder/expandable) -> PDF download -> text extraction (PyMuPDF with pdfplumber fallback) -> lexicon scoring -> alignment to the next valid 15-minute bar.
-- **Aggregation layer (CAM / RL policy)**: consumes factor signals and contextual features (including sentiment-derived state inputs) to learn adaptive weighting rules. This layer is conceptually defined and under iterative implementation/evaluation.
+### ✅ Completed
 
-## Current Repository Structure
-- **`notebooks/`**: interactive workflow notebooks, currently `price_factor_research.ipynb` (factor exploration) and `sentiment_pipeline_mvp.ipynb` (sentiment MVP run path).
-- **`src/`**: reusable pipeline modules (`src/cninfo`) for I/O, metadata loading/scraping stubs, PDF processing, sentiment scoring, and event-bar alignment.
-- **`data/`**: staged local artifacts (`raw/`, `interim/`, `processed/`), intentionally gitignored to prevent accidental data commits.
-- **`Factor.py`**: existing factor-generation script retained as-is.
+#### 1. Microstructure Factor Engineering
+- **70 factors** (`Factor.py`, `f_001`–`f_070`) computed on 1.5M rows of 15-minute intraday bar data (2018–2025)
+- Covers: bid-ask spread, order imbalance, OFI, Amihud illiquidity, microprice deviation, volume Z-scores, etc.
+- **LightGBM baseline**: IC = 0.0675, IC IR = **1.42** on 2024–2025 test set
 
-Completed currently: repository hygiene, modular sentiment MVP skeleton, and notebook wiring for reproducible local runs.  
-In progress: broader data coverage, production-grade CNINFO ingestion, and full CAM/RL integration/testing.
+#### 2. Deep Learning Models (trained, checkpoints saved)
+| Model | Checkpoint | Architecture |
+|-------|-----------|--------------|
+| CNN + LSTM + Transformer | `best_hybrid.pt` | Conv1D → LSTM → Transformer encoder |
+| GAT + Transformer | `best_gat_tf.pt` | Return-correlation graph → GAT → Transformer |
+| SSM + Transformer | `best_ssm_tf.pt` | Discrete state-space model → Transformer |
 
-## MVP Scope (Current Milestone)
-This MVP is scoped to staged, leakage-aware data engineering and preliminary validation:
-- Build a deterministic sentiment pipeline with explicit intermediate outputs.
-- Align announcement-derived features to next-available 15-minute bars to avoid look-ahead leakage.
-- Evaluate predictive validity using event-study style analysis and/or information coefficient (IC) diagnostics as validation steps.
-- Prioritize reproducibility through modular code, cached artifacts, and clearly defined inputs/outputs before model complexity is expanded.
+> All three trained on 70 microstructure factors only (sentiment not yet integrated).
+
+#### 3. Sentiment Pipeline (end-to-end, production-complete)
+Full pipeline from raw data collection to daily RL-ready features:
+
+**Data Collection**
+| Source | Rows | Coverage |
+|--------|------|----------|
+| CNINFO official announcements | 50,534 | 50 stocks × 2018–2025 |
+| EastMoney per-stock news | 500 | 50 stocks, recent 2025–2026 |
+| CCTV financial news | 11,029 | Market-level, 2018–2019 |
+| Baidu economic news | 14,735 | Market-level, 2020–2025 |
+| **Total texts** | **76,798** | — |
+
+**Inference**
+- Translation: `Helsinki-NLP/opus-mt-zh-en` (offline MarianMT, zh → en)
+- Sentiment model: `ProsusAI/finbert` (English FinBERT, 3-class)
+- Label distribution: neutral 92.3% / negative 4.3% / positive 3.5%
+- Score formula: `sentiment_score = P(positive) − P(negative) ∈ [−1, +1]`
+
+**Daily RL Features** (`daily_sentiment_features` table, 19,396 rows)
+| Feature | Description |
+|---------|-------------|
+| `mean_sentiment` | Importance-weighted daily sentiment score |
+| `sentiment_vol` | Weighted std dev (market disagreement) |
+| `message_volume` | Text count (information flow / buzz) |
+| `abnormal_sentiment` | 30-day rolling z-score (sentiment shock detector, clipped ±10) |
+
+Scripts: `scripts/download_sentiment_data.py` → `scripts/prepare_data.py` → `scripts/run_sentiment_nlp.py`
+
+---
+
+### 🔲 In Progress / Next Steps
+
+#### Step 1 — Integrate Sentiment into Training Data (immediate)
+Merge `daily_sentiment_features` with 15-minute bar data on `(SecuCode, TradingDay)`.
+Sentiment features become `f_071`–`f_074`, expanding the feature set from 70 → 74 columns.
+
+```python
+df_merged = df_bars.merge(df_sentiment,
+    left_on=["SecuCode", "TradingDay"],
+    right_on=["SecuCode", "trade_date"], how="left")
+df_merged[sentiment_cols] = df_merged.groupby("SecuCode")[sentiment_cols].ffill()
+```
+
+#### Step 2 — Retrain Models with Sentiment Features
+Re-run CNN+LSTM+TF, GAT+TF, SSM+TF on 74-feature set.
+Measure IC improvement from adding sentiment context.
+
+#### Step 3 — Train Cross-Attention Model
+`CROSS ATTEN.py` is written but no checkpoint exists (`best_tf_cross.pt` missing).
+This model captures cross-sectional dependencies by attending across stocks at the same timestamp.
+
+#### Step 4 — Build RL Aggregation Layer (core innovation)
+Design and implement the RL policy that dynamically weights the four model predictions
+as a function of current market state + sentiment regime. No code exists for this yet.
+
+#### Step 5 — Unified Backtest
+Compare: LightGBM baseline → individual deep models → RL-weighted ensemble
+Metrics: IC, IC IR, annual return, Sharpe ratio, max drawdown (2024–2025 test period)
+
+---
+
+## Repository Structure
+```
+├── Factor.py                    # 70 microstructure factors (f_001–f_070)
+├── CNN+LSTM+TRANSFORMER.py      # Hybrid deep learning model
+├── CROSS ATTEN.py               # Cross-sectional attention model
+├── GNN.py                       # Graph attention network model
+├── S4+Transformer.py            # State space model + Transformer
+├── scripts/
+│   ├── download_sentiment_data.py   # CNINFO + EastMoney data collection
+│   ├── prepare_data.py              # CCTV + Baidu market news + validation
+│   ├── run_sentiment_nlp.py         # FinBERT inference + daily aggregation
+│   └── pipeline_chain.py            # Auto-chained pipeline executor
+├── src/cninfo/
+│   ├── align.py                 # Leakage-safe event-to-bar alignment
+│   ├── sentiment.py             # Lexicon-based scoring (MVP baseline)
+│   ├── scrape.py                # CNINFO metadata loader
+│   └── io.py                    # Parquet I/O helpers
+├── notebooks/
+│   ├── sentiment_pipeline_mvp.ipynb
+│   └── Factor and boosting.ipynb
+├── SENTIMENT_PIPELINE_REPORT.md # Full sentiment pipeline results & SQL examples
+└── requirements.txt             # Full dependency list (Python 3.9)
+```
+
+> **Note:** `sentiment_data.db` (52MB SQLite) is gitignored. Run the scripts in order to regenerate locally.
+
+---
 
 ## Ethical and Data Considerations
-- CNINFO is a public corporate disclosure platform; this project uses publicly available announcements only.
-- Data collection should respect platform terms and operational limits, including request rate limiting.
-- The workflow is designed for compliant research use and does not include bypassing access controls or restrictions.
-- No private, proprietary, or restricted personal data is required for the current pipeline.
-
-## Roadmap
-- Expand sentiment coverage window to 2018-2025 with stable metadata and text quality controls.
-- Integrate sentiment-derived regime features into CAM state representations.
-- Evaluate whether factor weights shift systematically across sentiment/market regimes.
-- Run robustness checks across subperiods, sectors, and alternative sentiment specifications.
+- CNINFO is a public corporate disclosure platform; only publicly available announcements are used.
+- All data collection respects platform rate limits (polite throttling applied).
+- No private, proprietary, or restricted personal data is required.
+- Leakage prevention: event timestamps mapped to next-available bar (forward merge only).
