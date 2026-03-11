@@ -12,3 +12,9 @@ data/**/*.csv
 __pycache__/
 venv/
 .venv/
+
+# Large binary / generated data files (too large for GitHub)
+*.db
+*.sqlite
+/tmp/
+nohup.out

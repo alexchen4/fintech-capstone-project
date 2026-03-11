@@ -1,8 +1,56 @@
-pandas
-numpy
-pyarrow
-tqdm
-requests
-pymupdf
-pdfplumber
-rapidfuzz
+# ============================================================
+# CSI 300 Capstone - Python 3.9 虚拟环境依赖
+# ============================================================
+# 安装步骤:
+#   1. 创建 venv:
+#        C:/Python39/python.exe -m venv .venv
+#   2. 激活:
+#        .venv\Scripts\activate          (Windows CMD)
+#        source .venv/Scripts/activate   (Git Bash)
+#   3. 安装 PyTorch (CPU):
+#        pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+#   4. 安装其余依赖:
+#        pip install -r requirements.txt
+# ============================================================
+
+# ── 数据处理 ──────────────────────────────────────────────
+numpy==2.0.2
+pandas==2.3.3
+pyarrow==21.0.0
+scipy==1.13.1
+
+# ── 机器学习 ──────────────────────────────────────────────
+scikit-learn==1.6.1
+lightgbm>=4.3.0
+
+# ── 深度学习（PyTorch 单独安装，见上方说明）─────────────────
+# torch==2.8.0   # 通过 --index-url https://download.pytorch.org/whl/cpu 安装
+
+# ── HuggingFace 套件（NolBERT / FinBERT + 翻译）──────────
+transformers==4.57.6
+tokenizers==0.22.2
+huggingface_hub==0.36.2
+sentencepiece>=0.2.0
+sacremoses>=0.1.1
+accelerate>=0.27.0
+
+# ── 金融数据 ──────────────────────────────────────────────
+akshare==1.18.37
+baostock==0.8.9
+
+# ── PDF 处理（CNINFO 公告解析）────────────────────────────
+pymupdf>=1.24.0
+pdfplumber>=0.11.0
+pytesseract>=0.3.10
+
+# ── 图像处理 ──────────────────────────────────────────────
+Pillow==11.3.0
+
+# ── 工具库 ────────────────────────────────────────────────
+tqdm==4.67.3
+requests==2.32.5
+rapidfuzz>=3.9.0
+
+# ── 开发 / Notebook ────────────────────────────────────────
+jupyter>=1.0.0
+ipykernel>=6.29.0
