@@ -46,8 +46,8 @@ class PositionalEncoding(nn.Module):
 
 class CrossAttentionBlock(nn.Module):
     """
-    同一 time slice 上做股票截面 self-attention
-    输入: (B, D)
+    Cross-sectional self-attention over all stocks at the same time slice.
+    Input: (B, D)
     """
     def __init__(self, d_model, nhead=4, dropout=0.1):
         super().__init__()
@@ -101,17 +101,17 @@ class ResidualMLPHead(nn.Module):
 
 class TransformerCross(nn.Module):
     """
-    输入:
+    Input:
         X: (B, L, F)
-        B = 同一时点截面股票数
-        L = lookback
-        F = feature数
+        B = number of stocks in the cross-section at the same time point
+        L = lookback window length
+        F = number of features
 
-    流程:
-        1) 时间维 transformer
-        2) learnable pooling (last + mean)
-        3) 2层截面 cross-attention
-        4) residual MLP head
+    Pipeline:
+        1) Temporal transformer (time dimension)
+        2) Learnable pooling (last token + mean)
+        3) 2-layer cross-sectional cross-attention
+        4) Residual MLP head
     """
     def __init__(
         self,
@@ -237,7 +237,7 @@ def safe_corr_spearman(x, y):
 
 # =========================================================
 # 3) Dataset: Train / Valid
-# 输入窗口 = [t-lookback+1, ..., t]
+# Input window = [t-lookback+1, ..., t]
 # =========================================================
 class TimeConsistentSeqDataset(Dataset):
     def __init__(
@@ -293,7 +293,7 @@ class TimeConsistentSeqDataset(Dataset):
         for i in range(len(df)):
             s = start_for_row[i]
 
-            # 窗口 [i-lookback+1, ..., i]
+            # Window [i-lookback+1, ..., i]
             if i - lookback + 1 < s:
                 continue
 
@@ -342,15 +342,15 @@ class TimeConsistentSeqDataset(Dataset):
 
 # =========================================================
 # 4) Dataset: Test with train padding
-# test开头lag不够时，用train里同股票最后历史补
+# When test period has insufficient history at the start, pad with the last history of the same stock from train
 # =========================================================
 class FactorSequenceDatasetTestWithTrainPad(Dataset):
     """
-    对 df_test 中每一行构造长度为 lookback 的窗口:
+    Constructs a lookback-length window for each row in df_test:
         [t-lookback+1, ..., t]
 
-    若 test 内历史不够，则从 df_train 中同一股票最后历史补齐。
-    只对 test 做预测，不需要 y。
+    If test history is insufficient, pad from the last records of the same stock in df_train.
+    Only predicts on test data; labels (y) are not required.
     """
     def __init__(
         self,
@@ -373,7 +373,7 @@ class FactorSequenceDatasetTestWithTrainPad(Dataset):
         df_train = df_train.copy()
         df_test = df_test.copy()
 
-        # train/test 各自做同口径的截面 zscore
+        # Apply cross-sectional z-score independently on train and test
         if cs_zscore:
             grp_tr = df_train.groupby([day_col, time_col], sort=False)
             for col in feature_cols:
@@ -395,7 +395,7 @@ class FactorSequenceDatasetTestWithTrainPad(Dataset):
         self.df_train = df_train
         self.df_test = df_test
 
-        # train里每只股票最后历史
+        # Store the last lookback history for each stock in train
         self.train_hist = {}
         for secu, g in df_train.groupby(asset_col, sort=False):
             arr = g[feature_cols].to_numpy(np.float32)
@@ -403,7 +403,7 @@ class FactorSequenceDatasetTestWithTrainPad(Dataset):
             if len(arr) > 0:
                 self.train_hist[secu] = arr
 
-        # test里每只股票完整序列
+        # Store the full test sequence for each stock
         self.test_groups = {}
         for secu, g in df_test.groupby(asset_col, sort=False):
             self.test_groups[secu] = g.copy().reset_index()
@@ -422,9 +422,9 @@ class FactorSequenceDatasetTestWithTrainPad(Dataset):
 
                 need_hist = lookback - 1
                 left = max(0, j - need_hist)
-                test_hist = Xg[left : j + 1]   # 包含当前j
+                test_hist = Xg[left : j + 1]   # includes current row j
 
-                # 需要从 train 补多少
+                # How many rows to pad from train
                 lack = lookback - len(test_hist)
                 if lack > 0:
                     train_arr = self.train_hist.get(secu, None)
@@ -476,7 +476,7 @@ class FactorSequenceDatasetTestWithTrainPad(Dataset):
 # =========================================================
 class TimeSliceBatchSampler(Sampler):
     """
-    每个 batch = 同一个 (TradingDay, TimeEnd) 的所有样本（或分块）
+    Each batch = all samples from the same (TradingDay, TimeEnd) time slice (or chunked subset)
     """
     def __init__(self, bucket, shuffle_slices=True, max_batch=512, drop_small=10):
         self.bucket = bucket

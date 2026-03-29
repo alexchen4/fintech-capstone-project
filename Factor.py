@@ -1,8 +1,8 @@
 import numpy as np
 import pandas as pd
 
-EPS = 1e-12          # 数值稳定
-EPS_COUNT = 1.0      # 订单数/笔数这种“计数型”分母的平滑更合理用 1
+EPS = 1e-12          # numerical stability epsilon
+EPS_COUNT = 1.0      # smoothing denominator for count-type features (order count, tick count), 1 is appropriate
 
 # =========================
 # 0) sort
@@ -30,11 +30,11 @@ def _clip_inf(s: pd.Series) -> pd.Series:
     return s.replace([np.inf, -np.inf], np.nan)
 
 def _safe_div(a: pd.Series, b: pd.Series, eps: float = EPS) -> pd.Series:
-    # 科学：避免分母0导致 NaN；但仍保持数量级稳定
+    # Numerically safe: avoids NaN from zero denominator while preserving scale stability
     return _clip_inf(a / (b + eps))
 
 def _safe_div_zero(a: pd.Series, b: pd.Series) -> pd.Series:
-    # 可解释：分母为0则输出0（用于imbalance这种“无信息=中性”）
+    # Interpretable: zero denominator outputs 0 (used for imbalance-type features where “no info = neutral”)
     out = a / b.replace(0, np.nan)
     return _clip_inf(out).fillna(0.0)
 
@@ -58,9 +58,9 @@ def pct_change_by_st(df: pd.DataFrame, s: pd.Series) -> pd.Series:
 
 def _z(df, s, i: int, minp: int = 5):
     """
-    科学 zscore：
-    - warmup(minp未满) -> NaN（保留）
-    - std=0 -> 0（表示常数窗口内，没有偏离）
+    Robust rolling z-score:
+    - warmup (fewer than minp observations) -> NaN (preserved)
+    - std=0 (constant window) -> 0 (no deviation from mean)
     """
     m = _roll(df, s, i, minp, "mean")
     sd = _roll(df, s, i, minp, "std")
@@ -74,7 +74,7 @@ def _z(df, s, i: int, minp: int = 5):
 # =========================
 def book_state(df):
     bid1, ask1 = _get(df, "BidPrice1_last"), _get(df, "AskPrice1_last")
-    # 0=双边，1=仅bid，2=仅ask，3=都无
+    # 0=two-sided, 1=bid-only, 2=ask-only, 3=empty book
     return pd.Series(
         np.select(
             [(bid1>0)&(ask1>0), (bid1>0)&(ask1<=0), (bid1<=0)&(ask1>0)],
@@ -99,9 +99,9 @@ def _spread_raw(df):
 
 def _spread(df):
     """
-    科学处理单边盘口：
-    - 双边：ask-bid
-    - 单边：用每只股票最近一次有效spread做ffill（保持连续）
+    Robust one-sided quote handling:
+    - Two-sided: ask - bid
+    - One-sided: forward-fill the last valid spread per stock (maintain continuity)
     """
     if "spread" in df.columns:
         sp = _get(df, "spread")
@@ -114,7 +114,7 @@ def _microprice(df):
     bv1, av1   = _get(df, "BidVolume1_last"), _get(df, "AskVolume1_last")
     denom = (bv1 + av1)
     mp = (ask1 * bv1 + bid1 * av1) / denom.replace(0, np.nan)
-    # 双边且denom>0才算，否则退化为mid（避免NaN）
+    # Only compute when two-sided and denom>0; fall back to mid otherwise (avoids NaN)
     return mp.where((bid1 > 0) & (ask1 > 0) & (denom > 0), _mid(df))
 
 def _depth(df, side="bid", L=4):
@@ -138,7 +138,7 @@ def _ofi1_proxy(df):
 def _logret_mid(df):
     m = _mid(df)
     gm = _g(df, m)
-    # 若mid<=0会log出问题，这里防护一下
+    # Guard against log issues when mid <= 0
     m_pos = m.where(m > 0)
     prev = gm.shift(1).where(gm.shift(1) > 0)
     return np.log(m_pos) - np.log(prev)
@@ -151,7 +151,7 @@ def _amihud(df):
     return _safe_div(r, denom, eps=EPS)
 
 # =========================
-# 3) factors 001-070 (只改易爆missing的点)
+# 3) factors 001-070 (only modified NaN-explosion-prone points)
 # =========================
 
 def factor_001(df, i=4, j=12):
@@ -194,7 +194,7 @@ def factor_007(df, j=4):
     ask_cols = [f"AskVolume{t}_last" for t in range(1, j+1)]
     bid = df[bid_cols].astype(float).sum(axis=1)
     ask = df[ask_cols].astype(float).sum(axis=1)
-    # imbalance：分母为0时中性=0
+    # imbalance: denominator=0 treated as neutral (output 0)
     return _safe_div_zero(bid - ask, bid + ask)
 
 def factor_008(df, j=4):
@@ -209,7 +209,7 @@ def factor_009(df, j=4):
     ask_cols = [f"AskVolume{t}_last" for t in range(1, j+1)]
     bid = df[bid_cols].astype(float).sum(axis=1)
     ask = df[ask_cols].astype(float).sum(axis=1)
-    # 原来你把bid/ask总量=0直接NaN，这里改：总量=0时该项贡献为0
+    # Changed from original: when total bid/ask volume=0, contribution is 0 instead of NaN
     a = _safe_div_zero(_get(df,"BidVolume1_last"), bid)
     b = _safe_div_zero(_get(df,"AskVolume1_last"), ask)
     return a - b
@@ -219,7 +219,7 @@ def factor_010(df, j=4):
     ask_cols = [f"AskOrder{t}_last" for t in range(1, j+1)]
     bid_o = df[bid_cols].astype(float).sum(axis=1)
     ask_o = df[ask_cols].astype(float).sum(axis=1)
-    # 计数型：denom=0 说明无挂单/被扫空 -> 中性=0 + 平滑
+    # Count-type: denom=0 means no outstanding orders / fully swept -> neutral=0 + smoothing
     return (bid_o - ask_o) / (bid_o + ask_o + EPS_COUNT)
 
 def factor_011(df, i=10):
@@ -393,7 +393,7 @@ def factor_046(df, i=20):
     dm=_g(df,_mid(df)).diff()
     num=_roll(df, dm, i, 5, "sum").abs()
     den=_roll(df, dm.abs(), i, 5, "sum")
-    # den=0 -> 说明窗口内完全没动，方向强度=0（中性）
+    # den=0 -> window had no price movement at all, directional strength=0 (neutral)
     return _safe_div_zero(num, den)
 
 def factor_047(df, i=20):
@@ -405,7 +405,7 @@ def factor_047(df, i=20):
 def factor_048(df, i=20):
     sp=_spread(df).abs()
     dm=_g(df,_mid(df)).diff().abs()
-    x=_safe_div(sp, dm, eps=EPS)  # dm=0时不会NaN/inf爆炸
+    x=_safe_div(sp, dm, eps=EPS)  # dm=0 will not cause NaN/inf explosion
     return _roll(df, x, i, 5, "mean")
 
 def factor_049(df, i=20):
@@ -500,7 +500,7 @@ def factor_067(df, i=20):
     return _safe_div_zero(factor_024(df,i), factor_044(df,i))
 
 def factor_068(df, i=20):
-    # f_032, f_057 改后 std=0->0，f_068 的 NaN 会显著下降
+    # f_032, f_057 patched to std=0->0, so NaN rate in f_068 significantly reduced
     s1=factor_032(df,i)
     s2=factor_057(df,i)
     v=_get(df,"Volume_sum")

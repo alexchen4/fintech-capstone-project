@@ -18,3 +18,13 @@ venv/
 *.sqlite
 /tmp/
 nohup.out
+
+# Large parquet files (>10MB, regenerable from scripts)
+df_trainsub.parquet
+df_testsub_test.parquet
+df_testsub_full.parquet
+df_full_rl_clean.parquet
+df_full_rl_clean_close.parquet
+
+# Claude Code internal
+.claude/

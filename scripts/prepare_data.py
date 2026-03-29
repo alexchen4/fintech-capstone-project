@@ -224,9 +224,9 @@ def download_cctv_news(conn: sqlite3.Connection):
             t_time  = ""
             for c in cols:
                 cl = c.lower()
-                if "title" in cl or "标题" in c:
+                if "title" in cl or "标题" in c:  # "标题" = "title" in Chinese (AKShare may return Chinese column names)
                     t_title = str(r[c]).strip()
-                elif "time" in cl or "时间" in c:
+                elif "time" in cl or "时间" in c:  # "时间" = "time" in Chinese (AKShare may return Chinese column names)
                     t_time = str(r[c]).strip()
             if not t_title:
                 t_title = str(r[cols[-1]]).strip()
