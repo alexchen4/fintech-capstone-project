@@ -27,7 +27,7 @@
   "replay_capacity": 300000,
   "batch_size": 512,
   "warmup_steps": 2000,
-  "epochs": 50,
+  "epochs": 80,
   "action_noise_std": 0.1,
   "target_policy_noise_std": 0.02,
   "target_policy_noise_clip": 0.05,
